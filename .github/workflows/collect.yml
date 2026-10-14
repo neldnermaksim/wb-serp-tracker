@@ -9,6 +9,13 @@ on:
       top_n:
         description: "Глубина выдачи (top_n)"
         default: "200"
+      limit:
+        description: "Только первые N запросов (пусто — все 70). Для проверки."
+        default: ""
+      publish:
+        description: "Публиковать базу в ветку data"
+        type: boolean
+        default: true
 
 # Сборы идут строго по одному: следующий ждёт окончания предыдущего, чтобы не потерять данные.
 concurrency:
@@ -53,11 +60,11 @@ jobs:
         run: python -m wb_serp.publish pull
 
       - name: Сбор выдачи
-        run: python -m wb_serp.collect
+        run: python -m wb_serp.collect ${{ github.event.inputs.limit && format('--limit {0}', github.event.inputs.limit) || '' }}
 
       - name: Опубликовать базу в ветку data
         # Публикуем и после частично неудачного сбора: собранное не должно пропасть.
-        if: ${{ !cancelled() && hashFiles('data/serp.db') != '' }}
+        if: ${{ !cancelled() && hashFiles('data/serp.db') != '' && github.event.inputs.publish != 'false' }}
         run: python -m wb_serp.publish push
 
       - name: Итог
