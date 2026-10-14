@@ -86,6 +86,11 @@ def position_chart(
         tickformat="d",
         gridcolor="rgba(128,128,128,0.18)",
     )
+    times = history["collected_msk"].dropna().unique()
+    if len(times) == 1:
+        # Один сбор: без явного диапазона Plotly растягивает ось на секунды и дублирует подписи.
+        only = pd.Timestamp(times[0])
+        fig.update_xaxes(range=[only - pd.Timedelta(hours=1), only + pd.Timedelta(hours=1)])
     fig.update_xaxes(
         title=None,
         tickformat="%H:%M\n%d.%m",

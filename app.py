@@ -14,7 +14,8 @@ import pandas as pd
 import streamlit as st
 
 from wb_serp import analytics as an
-from wb_serp.charts import MAX_SERIES, position_chart
+from wb_serp.charts import MAX_SERIES, PALETTE_DARK, PALETTE_LIGHT, position_chart
+from wb_serp.images import image_url, load_routes
 from wb_serp.config import MSK, ROOT_DIR
 from wb_serp.remote import fetch_db
 
@@ -124,6 +125,19 @@ def q_runs(version: str) -> pd.DataFrame:
     return an.runs_log(conn(version))
 
 
+@st.cache_data(ttl=24 * 3600, show_spinner=False)
+def image_routes() -> list:
+    try:
+        return load_routes()
+    except Exception:  # noqa: BLE001 — без фото интерфейс тоже работает
+        return []
+
+
+def photos(nm_ids) -> list:
+    routes = image_routes()
+    return [image_url(nm, routes) if routes else None for nm in nm_ids]
+
+
 # ---------------------------------------------------------------- форматирование
 def fmt_ts(ts) -> str:
     if ts is None or pd.isna(ts):
@@ -181,6 +195,10 @@ def style_changes(df: pd.DataFrame, column: str):
         return "color: #8a8a8a"
 
     return df.style.map(color, subset=[column])
+
+
+# Значок в таблице повторяет маркер линии на графике (тот же цвет и форма).
+MARKER_GLYPHS = ["●", "■", "◆", "▲", "✕", "▼", "⬟", "★"]
 
 
 def product_label(row) -> str:
@@ -386,8 +404,13 @@ with tab_chart:
         st.subheader("Характеристики выбранных товаров", anchor=False)
         latest_df = q_latest(version, query_id, tuple(selected))
         if not latest_df.empty:
+            palette = PALETTE_DARK if dark else PALETTE_LIGHT
+            key_glyph = [MARKER_GLYPHS[slots[nm] % MAX_SERIES] for nm in latest_df["nm_id"]]
+            key_color = {i: palette[slots[nm] % MAX_SERIES] for i, nm in enumerate(latest_df["nm_id"])}
             table = pd.DataFrame(
                 {
+                    "Линия": key_glyph,
+                    "Фото": photos(latest_df["nm_id"]),
                     "Товар": latest_df["url"],
                     "Название": latest_df["name"],
                     "Бренд": latest_df["brand"],
@@ -408,17 +431,24 @@ with tab_chart:
                     ],
                 }
             )
+            styled = style_changes(table, "Изм.").apply(
+                lambda col: [f"color: {key_color[i]}; font-size: 1.1rem" for i in range(len(col))], subset=["Линия"]
+            )
             st.dataframe(
-                style_changes(table, "Изм."),
+                styled,
                 hide_index=True,
                 width="stretch",
                 column_config={
+                    "Линия": st.column_config.TextColumn("", width=36, help="Цвет и форма маркера на графике"),
+                    "Фото": st.column_config.ImageColumn("Фото", width="small"),
                     "Товар": st.column_config.LinkColumn(
                         "ID товара",
                         display_text=r"https://www\.wildberries\.ru/catalog/(\d+)/detail\.aspx",
                         help="nm_id; ссылка открывает карточку на wildberries.ru",
                     ),
-                    "Название": st.column_config.TextColumn(width="large"),
+                    "Название": st.column_config.TextColumn(width="medium"),
+                    "Продавец": st.column_config.TextColumn(width="small"),
+                    "Бренд": st.column_config.TextColumn(width="small"),
                     "Позиция": st.column_config.NumberColumn(format="%d", help="Место в последнем сборе, где товар был найден"),
                     "Изм.": st.column_config.TextColumn(help="Изменение позиции к предыдущему сбору, где товар тоже был"),
                     "Лучшая": st.column_config.NumberColumn(format="%d", help="Лучшая позиция за всё время"),
@@ -492,6 +522,7 @@ with tab_serp:
         {
             "Позиция": snap["position"],
             "Изм.": [change_label(c, n) for c, n in zip(snap["change"], snap["is_new"])],
+            "Фото": photos(snap["nm_id"]),
             "Товар": snap["url"],
             "Название": snap["name"],
             "Бренд": snap["brand"],
@@ -513,6 +544,7 @@ with tab_serp:
         column_config={
             "Позиция": st.column_config.NumberColumn(format="%d", width="small"),
             "Изм.": st.column_config.TextColumn(width="small", help="Изменение к предыдущему сбору; «новый» — в прошлый раз товара в топе не было"),
+            "Фото": st.column_config.ImageColumn("Фото", width="small"),
             "Товар": st.column_config.LinkColumn(
                 "ID товара", display_text=r"https://www\.wildberries\.ru/catalog/(\d+)/detail\.aspx"
             ),
@@ -539,7 +571,7 @@ with tab_serp:
             st.toast("Товары добавлены — откройте вкладку «Динамика позиций»", icon="📈")
     st.download_button(
         "Скачать выдачу CSV",
-        serp_table.assign(**{"Товар": snap["nm_id"].values}).rename(columns={"Товар": "ID товара"}).to_csv(index=False).encode("utf-8-sig"),
+        serp_table.drop(columns="Фото").assign(**{"Товар": snap["nm_id"].values}).rename(columns={"Товар": "ID товара"}).to_csv(index=False).encode("utf-8-sig"),
         file_name=f"wb_serp_{query_id}_{run_id}.csv",
         mime="text/csv",
     )

@@ -67,6 +67,12 @@ jobs:
         if: ${{ !cancelled() && hashFiles('data/serp.db') != '' && github.event.inputs.publish != 'false' }}
         run: python -m wb_serp.publish push
 
+      - name: Разбудить веб-интерфейс
+        # Адрес приложения задаётся переменной репозитория APP_URL (Settings → Variables).
+        if: ${{ !cancelled() && vars.APP_URL != '' }}
+        continue-on-error: true
+        run: python -m wb_serp.keepalive "${{ vars.APP_URL }}"
+
       - name: Итог
         if: always()
         run: |

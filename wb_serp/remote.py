@@ -9,9 +9,9 @@ import os
 import shutil
 import sqlite3
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
+
+import requests
 
 from .storage import SCHEMA
 
@@ -43,19 +43,17 @@ def fetch_db(url: str, target_dir: Path) -> Path:
     headers = {"User-Agent": "wb-serp-tracker"}
     if meta.get("url") == url and meta.get("etag"):
         headers["If-None-Match"] = meta["etag"]
-    try:
-        resp = urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=120)
-    except urllib.error.HTTPError as exc:
-        if exc.code == 304:
-            return target
-        raise
-
     stamp = f"{os.getpid()}.{time.time_ns()}"
     raw, unpacked = target_dir / f"download.{stamp}", target_dir / f"serp.{stamp}.db"
     try:
-        with resp, open(raw, "wb") as out:
-            shutil.copyfileobj(resp, out)
+        with requests.get(url, headers=headers, timeout=120, stream=True) as resp:
+            if resp.status_code == 304:
+                return target
+            resp.raise_for_status()
             etag = resp.headers.get("ETag")
+            with open(raw, "wb") as out:
+                for chunk in resp.iter_content(chunk_size=1 << 20):
+                    out.write(chunk)
         _unpack(raw, unpacked)
         conn = sqlite3.connect(unpacked)
         try:
