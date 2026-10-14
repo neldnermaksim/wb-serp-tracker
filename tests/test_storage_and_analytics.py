@@ -132,3 +132,15 @@ def test_latest_characteristics(db):
     latest = an.latest_characteristics(an.connect_readonly(str(path)), ids[q], [11]).iloc[0]
     assert latest["last_position"] == 1 and latest["prev_seen_position"] == 3
     assert latest["price_rub"] == 1200 and bool(latest["in_latest"])
+
+
+def test_snapshot_summary(db):
+    path, conn, ids = db
+    q = QUERIES[0]
+    t = dt.datetime(2026, 10, 14, 10, 5, tzinfo=UTC)
+    make_run(conn, ids, {q: [obs(1, 11), obs(2, 22), obs(3, 33), obs(4, 44)]}, t)
+    run2, _ = make_run(conn, ids, {q: [obs(1, 33), obs(2, 11), obs(3, 55), obs(4, 22)]}, t + dt.timedelta(hours=1))
+    s = an.snapshot_summary(an.connect_readonly(str(path)), ids[q], run2)
+    assert s["new"] == 1 and s["dropped"] == 1  # 55 пришёл, 44 выбыл
+    assert s["riser"]["nm_id"] == 33 and s["riser"]["change"] == 2
+    assert s["faller"]["nm_id"] == 22 and s["faller"]["change"] == -2

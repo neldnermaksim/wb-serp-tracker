@@ -1,11 +1,31 @@
 [theme]
-font = "sans serif"
+font = "Manrope:https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap, sans-serif"
+headingFont = "Manrope, sans-serif"
+headingFontWeights = [800, 800, 700, 700, 700, 700]
+baseRadius = "0.85rem"
+buttonRadius = "0.75rem"
+showWidgetBorder = false
+linkUnderline = false
 
+# Светлая тема — в духе wildberries.ru: светло-сиреневый фон, белые карточки, фиолетовый акцент.
 [theme.light]
-primaryColor = "#8e24aa"
+primaryColor = "#a73afd"
+backgroundColor = "#f5f3f9"
+secondaryBackgroundColor = "#f0ecf6"
+textColor = "#1a1523"
+borderColor = "#e7e2ef"
+linkColor = "#8a2be2"
+dataframeHeaderBackgroundColor = "#f7f4fb"
 
+# Тёмная тема — глубокий «ежевичный» фон.
 [theme.dark]
-primaryColor = "#ce93d8"
+primaryColor = "#b866ff"
+backgroundColor = "#110c18"
+secondaryBackgroundColor = "#241c30"
+textColor = "#f2edf9"
+borderColor = "#2f2540"
+linkColor = "#c99bff"
+dataframeHeaderBackgroundColor = "#1f1829"
 
 [server]
 headless = true

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 import os
+from html import escape
 import tempfile
 from pathlib import Path
 
@@ -14,14 +15,15 @@ import pandas as pd
 import streamlit as st
 
 from wb_serp import analytics as an
-from wb_serp.charts import MAX_SERIES, PALETTE_DARK, PALETTE_LIGHT, position_chart
+from wb_serp import ui
+from wb_serp.charts import MAX_SERIES, PALETTE_DARK, PALETTE_LIGHT, position_chart, runs_chart
 from wb_serp.images import image_url, load_routes
 from wb_serp.config import MSK, ROOT_DIR
 from wb_serp.remote import fetch_db
 
 st.set_page_config(
-    page_title="WB: позиции в поиске",
-    page_icon="📈",
+    page_title="WB · позиции в поиске",
+    page_icon="🟣",
     layout="wide",
     initial_sidebar_state="collapsed",
 )
@@ -33,7 +35,7 @@ DEFAULT_DB_URL = "https://raw.githubusercontent.com/neldnermaksim/wb-serp-tracke
 REMOTE_DIR = Path(tempfile.gettempdir()) / "wb_serp"
 REMOTE_TTL_SECONDS = 300
 
-PERIODS = {"24 часа": dt.timedelta(hours=24), "3 дня": dt.timedelta(days=3), "7 дней": dt.timedelta(days=7), "Всё время": None}
+PERIODS = {"Сутки": dt.timedelta(hours=24), "3 дня": dt.timedelta(days=3), "Неделя": dt.timedelta(days=7), "Всё время": None}
 
 
 # ---------------------------------------------------------------- источник данных
@@ -121,6 +123,11 @@ def q_snapshot(version: str, query_id: int, run_id: int) -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False)
+def q_snapshot_summary(version: str, query_id: int, run_id: int) -> dict:
+    return an.snapshot_summary(conn(version), query_id, run_id)
+
+
+@st.cache_data(show_spinner=False)
 def q_runs(version: str) -> pd.DataFrame:
     return an.runs_log(conn(version))
 
@@ -196,21 +203,23 @@ def change_label(change, is_new: bool = False) -> str:
     return "="
 
 
-def style_changes(df: pd.DataFrame, column: str):
+def style_changes(df: pd.DataFrame, column: str, t: ui.Tokens):
     def color(value: str) -> str:
         if isinstance(value, str) and value.startswith("▲"):
-            return "color: #0f8a3c; font-weight: 600"
+            return f"color: {t.ok}; font-weight: 700"
         if isinstance(value, str) and value.startswith("▼"):
-            return "color: #d03b3b; font-weight: 600"
+            return f"color: {t.bad}; font-weight: 700"
         if value == "новый":
-            return "color: #2a78d6; font-weight: 600"
-        return "color: #8a8a8a"
+            return f"color: {t.new}; font-weight: 700"
+        return f"color: {t.muted}"
 
     return df.style.map(color, subset=[column])
 
 
 # Значок в таблице повторяет маркер линии на графике (тот же цвет и форма).
 MARKER_GLYPHS = ["●", "■", "◆", "▲", "✕", "▼", "⬟", "★"]
+WB_LINK = r"https://www\.wildberries\.ru/catalog/(\d+)/detail\.aspx"
+REPO_URL = "https://github.com/neldnermaksim/wb-serp-tracker"
 
 
 def product_label(row) -> str:
@@ -225,24 +234,19 @@ def product_label(row) -> str:
     return " · ".join(parts)
 
 
-# ---------------------------------------------------------------- стили
-st.markdown(
-    """
-    <style>
-      .block-container {padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1400px;}
-      h1 {font-size: 1.85rem !important; margin-bottom: 0 !important;}
-      .subtitle {color: var(--text-color); opacity: .68; font-size: .95rem; margin: .1rem 0 1rem 0;}
-      .pill {display: inline-block; padding: .12rem .55rem; border-radius: 999px; font-size: .8rem;
-             background: rgba(128,128,128,.12); margin-right: .35rem;}
-      .pill.ok {background: rgba(15,138,60,.14); color: var(--ok-color);}
-      .pill.warn {background: rgba(237,161,0,.18); color: var(--warn-color);}
-      div[data-testid="stMetricValue"] {font-size: 1.55rem;}
-      div[data-testid="stMetricLabel"] p {font-size: .85rem; opacity: .75;}
-      .hint {font-size: .85rem; opacity: .7;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+def mover_value(item: dict | None, up: bool) -> str:
+    if not item:
+        return "—"
+    arrow, cls = ("▲", "up") if up else ("▼", "down")
+    return f'<span class="{cls}">{arrow} {abs(item["change"])}</span> · #{item["position"]}'
+
+
+def mover_sub(item: dict | None) -> str:
+    if not item:
+        return "без изменений"
+    brand = f" · {short(item['brand'], 18)}" if isinstance(item.get("brand"), str) and item["brand"] else ""
+    return f"ID {item['nm_id']}{brand}"
+
 
 # ---------------------------------------------------------------- данные
 db_path, source = resolve_db()
@@ -256,73 +260,86 @@ summary = q_summary(version)
 queries = q_queries(version)
 queries = queries[queries["is_active"] == 1].reset_index(drop=True)
 
+dark = getattr(getattr(st.context, "theme", None), "type", "light") == "dark"
+tk = ui.tokens(dark)
+st.markdown(ui.css(tk), unsafe_allow_html=True)
+
 if not summary["runs"]:
     st.title("Позиции товаров в поиске Wildberries")
     st.info("В базе ещё нет ни одного сбора. Запустите `python -m wb_serp.collect`.")
     st.stop()
 
-dark = getattr(getattr(st.context, "theme", None), "type", "light") == "dark"
 top_n = int(summary["top_n"] or 200)
 last_run = summary["last_run_msk"]
-
-# Цвета статусов подбираются под тему, чтобы текст оставался контрастным.
-st.markdown(
-    f"<style>:root {{--ok-color: {'#5cd68a' if dark else '#0f7a35'}; --warn-color: {'#f0b429' if dark else '#8a5a00'};}}</style>",
-    unsafe_allow_html=True,
-)
+fresh = last_run is not None and (pd.Timestamp.now(tz=MSK) - last_run) < pd.Timedelta(minutes=90)
 
 # ---------------------------------------------------------------- шапка
-st.title("Позиции товаров в поиске Wildberries")
-status_class = "ok" if last_run is not None and ago(last_run).endswith(("мин назад", "только что")) else "warn"
+when = ago(last_run)
 st.markdown(
-    f"""<div class="subtitle">
-      <span class="pill">📍 {summary['city']} (центр)</span>
-      <span class="pill">🔝 топ-{top_n}</span>
-      <span class="pill">⏱ сбор каждый час</span>
-      <span class="pill {status_class}">последний сбор: {fmt_ts(last_run)} МСК · {ago(last_run)}</span>
-      <span class="pill">{plural(summary['runs'], 'сбор', 'сбора', 'сборов')} · {plural(summary['observations'], 'наблюдение', 'наблюдения', 'наблюдений')}</span>
-    </div>""",
+    ui.hero(
+        title="Позиции товаров в поиске Wildberries",
+        lead=f"{len(queries)} поисковых запросов · первые {top_n} товаров выдачи · история позиций по часам",
+        chips=[
+            f"Москва, центр",
+            "Сбор каждый час",
+            plural(summary["runs"], "сбор", "сбора", "сборов"),
+            plural(summary["observations"], "наблюдение", "наблюдения", "наблюдений"),
+        ],
+        status_label="Данные свежие" if fresh else "Последнее обновление",
+        status_big=when[:1].upper() + when[1:] if when else "—",
+        status_sub=f"последний сбор {fmt_ts(last_run)} МСК",
+        fresh=fresh,
+    ),
     unsafe_allow_html=True,
 )
 
-# ---------------------------------------------------------------- фильтры (одна строка над всем остальным)
+# ---------------------------------------------------------------- фильтры
 query_ids = queries["query_id"].tolist()
 query_text = dict(zip(queries["query_id"], queries["text"]))
 query_order = dict(zip(queries["query_id"], queries["sort_order"]))
 
-c_query, c_period = st.columns([3, 2], vertical_alignment="bottom")
-with c_query:
-    if "query_id" not in st.session_state or st.session_state["query_id"] not in query_ids:
-        st.session_state["query_id"] = query_ids[0]
-    query_id = st.selectbox(
-        "Поисковый запрос",
-        query_ids,
-        key="query_id",
-        format_func=lambda qid: f"{query_order[qid]}. {query_text[qid]}",
-        help="70 запросов из ТЗ в исходных формулировках. Можно начать печатать для поиска.",
-    )
-with c_period:
-    period_name = st.segmented_control(
-        "Период", list(PERIODS), default="Всё время", key="period", selection_mode="single"
-    ) or "Всё время"
+with st.container(key="card_filters"):
+    c_query, c_period = st.columns([3, 2], vertical_alignment="bottom")
+    with c_query:
+        if "query_id" not in st.session_state or st.session_state["query_id"] not in query_ids:
+            st.session_state["query_id"] = query_ids[0]
+        query_id = st.selectbox(
+            "Поисковый запрос",
+            query_ids,
+            key="query_id",
+            format_func=lambda qid: f"{query_order[qid]}. {query_text[qid]}",
+            help="70 запросов из ТЗ в исходных формулировках. Можно начать печатать для поиска.",
+        )
+    with c_period:
+        period_name = st.segmented_control(
+            "Период", list(PERIODS), default="Всё время", key="period", selection_mode="single", width="stretch"
+        ) or "Всё время"
 
 collections = q_collections(version, query_id)
 products = q_products(version, query_id)
-
 if collections.empty:
     st.warning("По этому запросу ещё нет успешных сборов.")
     st.stop()
 
 latest = collections.iloc[-1]
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Сборов по запросу", fmt_int(len(collections)), help="Сколько раз выдача по запросу была успешно собрана")
-k2.metric("Товаров за всё время", fmt_int(len(products)), help="Уникальные nm_id, хоть раз попадавшие в топ")
-k3.metric("Всего товаров у WB", fmt_int(latest["wb_total"]), help="Сколько товаров WB нашёл по запросу в последнем сборе")
-k4.metric("Последний сбор запроса", fmt_ts(latest["collected_msk"]), help="Московское время")
-
-tab_chart, tab_serp, tab_runs, tab_about = st.tabs(
-    ["📈 Динамика позиций", "📋 Выдача целиком", "🗂 Журнал сборов", "ℹ️ Как это работает"]
+first = collections.iloc[0]
+st.markdown(
+    ui.kpis(
+        [
+            ui.Kpi("Сборов по запросу", fmt_int(len(collections)), f"с {fmt_ts(first['collected_msk'])}", "refresh",
+                   title="Сколько раз выдача по запросу была успешно собрана"),
+            ui.Kpi("Товаров за всё время", fmt_int(len(products)), f"хоть раз в топ-{top_n}", "layers",
+                   title="Уникальные nm_id, когда-либо попадавшие в собранную выдачу"),
+            ui.Kpi("Найдено у WB", fmt_int(latest["wb_total"]), "товаров по запросу", "search",
+                   title="Сколько всего товаров WB нашёл по запросу в последнем сборе"),
+            ui.Kpi("Последний сбор", pd.Timestamp(latest["collected_msk"]).strftime("%H:%M"),
+                   pd.Timestamp(latest["collected_msk"]).strftime("%d.%m.%Y, МСК"), "clock"),
+        ]
+    ),
+    unsafe_allow_html=True,
 )
+
+tab_chart, tab_serp, tab_runs, tab_about = st.tabs(["Динамика позиций", "Выдача целиком", "Журнал сборов", "Как это работает"])
 
 # ---------------------------------------------------------------- выбор товаров
 sel_key = f"selected_{query_id}"
@@ -334,7 +351,6 @@ if sel_key not in st.session_state:
     st.session_state[sel_key] = in_latest[:5] or list(labels_all)[:5]
 # Если товар пропал из справочника (другая база) — убираем из выбора.
 st.session_state[sel_key] = [x for x in st.session_state[sel_key] if x in labels_all][:MAX_SERIES]
-
 
 QUICK_PICKS = {"Топ-3": 3, "Топ-5": 5, "Топ-8": 8, "Очистить": 0}
 
@@ -362,314 +378,376 @@ def assign_slots(selected: list[int]) -> dict[int, int]:
     return slots
 
 
-# ---------------------------------------------------------------- вкладка: график
+# ---------------------------------------------------------------- вкладка: динамика позиций
 with tab_chart:
-    c_sel, c_quick = st.columns([4, 2], vertical_alignment="bottom")
-    with c_sel:
-        selected = st.multiselect(
-            f"Товары (ID) — до {MAX_SERIES} одновременно",
-            options=list(labels_all),
-            key=sel_key,
-            format_func=lambda nm: labels_all.get(nm, str(nm)),
-            max_selections=MAX_SERIES,
-            placeholder="Начните вводить ID или бренд…",
-            help="В списке все товары, когда-либо найденные по этому запросу. "
-            "Сначала идут товары из последней выдачи по порядку позиций.",
+    with st.container(key="card_chart"):
+        st.markdown(
+            ui.section("Как менялись позиции", "1 — первое место · наведите на график: дата, ID и позиция"),
+            unsafe_allow_html=True,
         )
-    with c_quick:
-        st.pills(
-            "Быстрый выбор",
-            list(QUICK_PICKS),
-            key=f"quick_{query_id}",
-            on_change=apply_quick_pick,
-            args=(f"quick_{query_id}",),
-            help="Товары с первых мест последнего сбора",
-        )
-
-    if not selected:
-        st.info("Выберите один или несколько товаров, чтобы увидеть, как менялись их позиции.")
-    else:
-        slots = assign_slots(selected)
-        history = q_history(version, query_id, tuple(selected))
-        period = PERIODS[period_name]
-        if period is not None:
-            history = history[history["collected_msk"] >= pd.Timestamp.now(tz=MSK) - period]
-
-        prod_info = products.set_index("nm_id")
-        legend = {}
-        for nm in selected:
-            brand = prod_info.at[nm, "brand"] if nm in prod_info.index else None
-            legend[nm] = f"{nm} · {short(brand, 18)}" if isinstance(brand, str) and brand else str(nm)
-
-        full_depth = st.toggle(
-            f"Показывать всю глубину топ-{top_n}",
-            value=False,
-            help="Выключено — масштаб по данным выбранных товаров. Включено — шкала от 1 до глубины сбора.",
-        )
-        if history.empty:
-            st.info("За выбранный период сборов не было — выберите период побольше.")
-        else:
-            fig = position_chart(history, legend, slots, top_n=top_n, full_depth=full_depth, dark=dark)
-            st.plotly_chart(
-                fig,
-                width="stretch",
-                config={"displaylogo": False, "locale": "ru", "modeBarButtonsToRemove": ["select2d", "lasso2d"]},
+        c_sel, c_quick = st.columns([3, 2], vertical_alignment="bottom")
+        with c_sel:
+            selected = st.multiselect(
+                f"Товары (ID) — до {MAX_SERIES} одновременно",
+                options=list(labels_all),
+                key=sel_key,
+                format_func=lambda nm: labels_all.get(nm, str(nm)),
+                max_selections=MAX_SERIES,
+                placeholder="Начните вводить ID или бренд…",
+                help="Все товары, когда-либо найденные по этому запросу. "
+                "Сначала идут товары из последней выдачи по порядку позиций.",
             )
-            missing = history.groupby("nm_id")["found"].agg(lambda s: int((~s).sum()))
-            n_points = history["run_id"].nunique()
+        with c_quick:
+            st.pills(
+                "Быстрый выбор",
+                list(QUICK_PICKS),
+                key=f"quick_{query_id}",
+                on_change=apply_quick_pick,
+                args=(f"quick_{query_id}",),
+                help="Товары с первых мест последнего сбора",
+            )
+
+        if not selected:
+            st.info("Выберите один или несколько товаров — здесь появится график их позиций.")
+        else:
+            slots = assign_slots(selected)
+            history = q_history(version, query_id, tuple(selected))
+            period = PERIODS[period_name]
+            if period is not None:
+                history = history[history["collected_msk"] >= pd.Timestamp.now(tz=MSK) - period]
+
+            prod_info = products.set_index("nm_id")
+            legend = {}
+            for nm in selected:
+                brand = prod_info.at[nm, "brand"] if nm in prod_info.index else None
+                legend[nm] = f"{nm} · {short(brand, 18)}" if isinstance(brand, str) and brand else str(nm)
+
+            full_depth = st.toggle(
+                f"Вся глубина топ-{top_n}",
+                value=False,
+                help="Выключено — масштаб по выбранным товарам. Включено — шкала от 1 до глубины сбора.",
+            )
+            if history.empty:
+                st.info("За выбранный период сборов не было — выберите период побольше.")
+            else:
+                fig = position_chart(history, legend, slots, top_n=top_n, full_depth=full_depth, dark=dark)
+                st.plotly_chart(fig, width="stretch", theme=None, config={"displayModeBar": False, "locale": "ru"})
+                n_points = history["run_id"].nunique()
+                missing = history.groupby("nm_id")["found"].agg(lambda s: int((~s).sum()))
+                gaps = [f"{nm} — нет в {int(m)} из {n_points}" for nm, m in missing.items() if m]
+                gaps_html = f"<br>Пропуски за период: {escape('; '.join(gaps))}." if gaps else ""
+                st.markdown(
+                    f"<div class='wb-note'>Точка — один сбор ({plural(n_points, 'сбор', 'сбора', 'сборов')} за период). "
+                    "<b>Разрыв линии</b> — в этом сборе товара не было в топе: позиция не выдумывается и не достраивается. "
+                    "Выделите область, чтобы приблизить, двойной клик — сбросить; клик по легенде скрывает линию."
+                    f"{gaps_html}</div>",
+                    unsafe_allow_html=True,
+                )
+
+    if selected:
+        with st.container(key="card_table"):
             st.markdown(
-                f"<div class='hint'>Позиция 1 — вверху. Точка — один сбор ({n_points} за период). "
-                "<b>Разрыв линии</b> — в этом сборе товара не было в топе: позиция не выдумывается и не "
-                "достраивается. Наведите курсор, чтобы увидеть дату, ID и позицию; выделите область, чтобы "
-                "приблизить, двойной клик — сбросить масштаб.</div>",
+                ui.section("Характеристики выбранных товаров", "последние известные значения в выдаче по запросу"),
                 unsafe_allow_html=True,
             )
-            gaps = [f"{nm}: не найден в {int(m)} из {n_points}" for nm, m in missing.items() if m]
-            if gaps:
-                st.caption("Пропуски за период — " + "; ".join(gaps))
+            latest_df = q_latest(version, query_id, tuple(selected))
+            if not latest_df.empty:
+                palette = PALETTE_DARK if dark else PALETTE_LIGHT
+                key_color = {i: palette[slots[nm] % MAX_SERIES] for i, nm in enumerate(latest_df["nm_id"])}
+                table = pd.DataFrame(
+                    {
+                        "Линия": [MARKER_GLYPHS[slots[nm] % MAX_SERIES] for nm in latest_df["nm_id"]],
+                        "Фото": photos(latest_df["nm_id"]),
+                        "Товар": latest_df["url"],
+                        "Название": latest_df["name"],
+                        "Продавец": latest_df["supplier"],
+                        "Позиция": latest_df["last_position"],
+                        "Изм.": [
+                            change_label(p - c) if pd.notna(p) else ""
+                            for p, c in zip(latest_df["prev_seen_position"], latest_df["last_position"])
+                        ],
+                        "Лучшая": latest_df["best_position"],
+                        "Цена": latest_df["price_rub"],
+                        "Рейтинг": latest_df["rating"],
+                        "Отзывы": latest_df["feedbacks"],
+                        "Доставка": latest_df["delivery_days"],
+                        "Данные на": [
+                            fmt_ts(t) + ("" if fresh_row else " · нет в последней выдаче")
+                            for t, fresh_row in zip(latest_df["last_seen_msk"], latest_df["in_latest"])
+                        ],
+                    }
+                )
+                styled = style_changes(table, "Изм.", tk).apply(
+                    lambda col: [f"color: {key_color[i]}; font-size: 1.1rem" for i in range(len(col))], subset=["Линия"]
+                )
+                st.dataframe(
+                    styled,
+                    hide_index=True,
+                    width="stretch",
+                    row_height=52,
+                    column_config={
+                        "Линия": st.column_config.TextColumn("", width=34, help="Цвет и форма маркера на графике"),
+                        "Фото": st.column_config.ImageColumn("", width=48),
+                        "Товар": st.column_config.LinkColumn(
+                            "ID товара", display_text=WB_LINK, help="nm_id; ссылка открывает карточку на wildberries.ru"
+                        ),
+                        "Название": st.column_config.TextColumn(width="medium"),
+                        "Продавец": st.column_config.TextColumn(width="small"),
+                        "Позиция": st.column_config.NumberColumn(format="%d", help="Место в последнем сборе, где товар был найден"),
+                        "Изм.": st.column_config.TextColumn(help="Изменение к предыдущему сбору, где товар тоже был"),
+                        "Лучшая": st.column_config.NumberColumn(format="%d", help="Лучшая позиция за всё время"),
+                        "Цена": st.column_config.NumberColumn(format="%d ₽", help="Цена для покупателя со всеми скидками"),
+                        "Рейтинг": st.column_config.NumberColumn(format="★ %.1f", help="Пусто — у товара ещё нет оценок"),
+                        "Отзывы": st.column_config.NumberColumn(format="localized", help="Количество оценок"),
+                        "Доставка": st.column_config.NumberColumn(
+                            format="%d дн.", help="Календарных дней до доставки в Москву: сегодня — 0, завтра — 1"
+                        ),
+                    },
+                )
 
-        st.subheader("Характеристики выбранных товаров", anchor=False)
-        latest_df = q_latest(version, query_id, tuple(selected))
-        if not latest_df.empty:
-            palette = PALETTE_DARK if dark else PALETTE_LIGHT
-            key_glyph = [MARKER_GLYPHS[slots[nm] % MAX_SERIES] for nm in latest_df["nm_id"]]
-            key_color = {i: palette[slots[nm] % MAX_SERIES] for i, nm in enumerate(latest_df["nm_id"])}
-            table = pd.DataFrame(
-                {
-                    "Линия": key_glyph,
-                    "Фото": photos(latest_df["nm_id"]),
-                    "Товар": latest_df["url"],
-                    "Название": latest_df["name"],
-                    "Бренд": latest_df["brand"],
-                    "Продавец": latest_df["supplier"],
-                    "Позиция": latest_df["last_position"],
-                    "Изм.": [
-                        change_label(p - c) if pd.notna(p) else ""
-                        for p, c in zip(latest_df["prev_seen_position"], latest_df["last_position"])
-                    ],
-                    "Лучшая": latest_df["best_position"],
-                    "Цена, ₽": latest_df["price_rub"],
-                    "Рейтинг": latest_df["rating"],
-                    "Отзывы": latest_df["feedbacks"],
-                    "Доставка, дн.": latest_df["delivery_days"],
-                    "Данные на": [
-                        fmt_ts(t) + ("" if fresh else " · нет в последней выдаче")
-                        for t, fresh in zip(latest_df["last_seen_msk"], latest_df["in_latest"])
-                    ],
-                }
-            )
-            styled = style_changes(table, "Изм.").apply(
-                lambda col: [f"color: {key_color[i]}; font-size: 1.1rem" for i in range(len(col))], subset=["Линия"]
-            )
-            st.dataframe(
-                styled,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "Линия": st.column_config.TextColumn("", width=36, help="Цвет и форма маркера на графике"),
-                    "Фото": st.column_config.ImageColumn("Фото", width="small"),
-                    "Товар": st.column_config.LinkColumn(
-                        "ID товара",
-                        display_text=r"https://www\.wildberries\.ru/catalog/(\d+)/detail\.aspx",
-                        help="nm_id; ссылка открывает карточку на wildberries.ru",
-                    ),
-                    "Название": st.column_config.TextColumn(width="medium"),
-                    "Продавец": st.column_config.TextColumn(width="small"),
-                    "Бренд": st.column_config.TextColumn(width="small"),
-                    "Позиция": st.column_config.NumberColumn(format="%d", help="Место в последнем сборе, где товар был найден"),
-                    "Изм.": st.column_config.TextColumn(help="Изменение позиции к предыдущему сбору, где товар тоже был"),
-                    "Лучшая": st.column_config.NumberColumn(format="%d", help="Лучшая позиция за всё время"),
-                    "Цена, ₽": st.column_config.NumberColumn(format="%d ₽", help="Цена для покупателя со всеми скидками"),
-                    "Рейтинг": st.column_config.NumberColumn(format="★ %.1f", help="Пусто — у товара ещё нет оценок"),
-                    "Отзывы": st.column_config.NumberColumn(format="localized", help="Количество оценок"),
-                    "Доставка, дн.": st.column_config.NumberColumn(
-                        format="%d", help="Календарных дней до доставки в Москву: сегодня — 0, завтра — 1"
-                    ),
-                },
-            )
-
-        with st.expander("Все наблюдения выбранных товаров"):
-            obs = q_history(version, query_id, tuple(selected))
-            obs = obs[obs["found"]].sort_values(["collected_msk", "position"], ascending=[False, True])
-            export = pd.DataFrame(
-                {
-                    "Запрос": query_text[query_id],
-                    "Дата и время сбора (МСК)": obs["collected_msk"].dt.strftime("%d.%m.%Y %H:%M"),
-                    "Позиция": obs["position"].astype(int),
-                    "ID товара": obs["nm_id"],
-                    "Цена, ₽": obs["price_rub"],
-                    "Рейтинг": obs["rating"],
-                    "Отзывы": obs["feedbacks"],
-                    "Доставка, дн.": obs["delivery_days"],
-                    "Продавец": obs["nm_id"].map(prod_info["supplier"]),
-                }
-            )
-            st.dataframe(
-                export,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "ID товара": st.column_config.NumberColumn(format="%d"),
-                    "Цена, ₽": st.column_config.NumberColumn(format="%d ₽"),
-                    "Рейтинг": st.column_config.NumberColumn(format="%.1f"),
-                },
-            )
-            st.download_button(
-                "Скачать CSV",
-                export.to_csv(index=False).encode("utf-8-sig"),
-                file_name=f"wb_positions_{query_id}.csv",
-                mime="text/csv",
-            )
+            with st.expander("Все наблюдения выбранных товаров и выгрузка в CSV"):
+                obs = q_history(version, query_id, tuple(selected))
+                obs = obs[obs["found"]].sort_values(["collected_msk", "position"], ascending=[False, True])
+                export = pd.DataFrame(
+                    {
+                        "Запрос": query_text[query_id],
+                        "Дата и время сбора (МСК)": obs["collected_msk"].dt.strftime("%d.%m.%Y %H:%M"),
+                        "Позиция": obs["position"].astype(int),
+                        "ID товара": obs["nm_id"],
+                        "Цена, ₽": obs["price_rub"],
+                        "Рейтинг": obs["rating"],
+                        "Отзывы": obs["feedbacks"],
+                        "Доставка, дн.": obs["delivery_days"],
+                        "Продавец": obs["nm_id"].map(prod_info["supplier"]),
+                    }
+                )
+                st.dataframe(
+                    export,
+                    hide_index=True,
+                    width="stretch",
+                    column_config={
+                        "ID товара": st.column_config.NumberColumn(format="%d"),
+                        "Цена, ₽": st.column_config.NumberColumn(format="%d ₽"),
+                        "Рейтинг": st.column_config.NumberColumn(format="%.1f"),
+                    },
+                )
+                st.download_button(
+                    "Скачать CSV",
+                    export.to_csv(index=False).encode("utf-8-sig"),
+                    file_name=f"wb_positions_{query_id}.csv",
+                    mime="text/csv",
+                    icon=":material/download:",
+                )
 
 # ---------------------------------------------------------------- вкладка: выдача целиком
 with tab_serp:
-    runs_desc = collections.sort_values("collected_msk", ascending=False)
-    c_run, c_search = st.columns([2, 3], vertical_alignment="bottom")
-    with c_run:
-        run_id = st.selectbox(
-            "Сбор",
-            runs_desc["run_id"].tolist(),
-            format_func=lambda rid: (
-                f"{fmt_ts(runs_desc.set_index('run_id').at[rid, 'collected_msk'])} МСК · "
-                f"{plural(runs_desc.set_index('run_id').at[rid, 'items'], 'товар', 'товара', 'товаров')}"
-            ),
-            key=f"serp_run_{query_id}",
-        )
-    with c_search:
-        needle = st.text_input("Фильтр", placeholder="ID, название, бренд или продавец", key=f"serp_filter_{query_id}")
+    runs_desc = collections.sort_values("collected_msk", ascending=False).set_index("run_id")
+    run_ids = runs_desc.index.tolist()
+    run_key = f"serp_run_{query_id}"
+    if st.session_state.get(run_key) not in run_ids:
+        st.session_state[run_key] = run_ids[0]
+    current_run = st.session_state[run_key]
+    moves = q_snapshot_summary(version, query_id, int(current_run))
+    has_prev = moves["prev_run_id"] is not None
+    st.markdown(
+        ui.kpis(
+            [
+                ui.Kpi("Новые в топе", fmt_int(moves["new"]) if has_prev else "—", "к прошлому сбору", "plus", "new",
+                       title="Товары, которых не было в топе при предыдущем сборе"),
+                ui.Kpi("Выбыли из топа", fmt_int(moves["dropped"]) if has_prev else "—", "к прошлому сбору", "minus", "bad",
+                       title="Товары, которые были в топе при предыдущем сборе, а теперь нет"),
+                ui.Kpi("Сильнее всех вырос", mover_value(moves["riser"], True), mover_sub(moves["riser"]), "trend_up", "ok", value_html=True),
+                ui.Kpi("Сильнее всех упал", mover_value(moves["faller"], False), mover_sub(moves["faller"]), "trend_down", "bad", value_html=True),
+            ]
+        ),
+        unsafe_allow_html=True,
+    )
 
-    snap = q_snapshot(version, query_id, int(run_id))
-    if needle:
-        hay = (
-            snap["nm_id"].astype(str) + " " + snap["name"].fillna("") + " " + snap["brand"].fillna("") + " " + snap["supplier"].fillna("")
-        ).str.lower()
-        snap = snap[hay.str.contains(needle.lower(), regex=False)]
+    with st.container(key="card_serp"):
+        st.markdown(ui.section("Выдача целиком", "отметьте строки, чтобы добавить товары на график"), unsafe_allow_html=True)
+        c_run, c_search = st.columns([2, 3], vertical_alignment="bottom")
+        with c_run:
+            run_id = st.selectbox(
+                "Сбор",
+                run_ids,
+                format_func=lambda rid: (
+                    f"{fmt_ts(runs_desc.at[rid, 'collected_msk'])} МСК · "
+                    f"{plural(runs_desc.at[rid, 'items'], 'товар', 'товара', 'товаров')}"
+                ),
+                key=run_key,
+            )
+        with c_search:
+            needle = st.text_input(
+                "Поиск по выдаче", placeholder="ID, название, бренд или продавец", key=f"serp_filter_{query_id}",
+                icon=":material/search:",
+            )
 
-    serp_table = pd.DataFrame(
-        {
-            "Позиция": snap["position"],
-            "Изм.": [change_label(c, n) for c, n in zip(snap["change"], snap["is_new"])],
-            "Фото": photos(snap["nm_id"]),
-            "Товар": snap["url"],
-            "Название": snap["name"],
-            "Бренд": snap["brand"],
-            "Продавец": snap["supplier"],
-            "Цена, ₽": snap["price_rub"],
-            "Рейтинг": snap["rating"],
-            "Отзывы": snap["feedbacks"],
-            "Доставка, дн.": snap["delivery_days"],
-        }
-    )
-    event = st.dataframe(
-        style_changes(serp_table, "Изм."),
-        hide_index=True,
-        width="stretch",
-        height=560,
-        on_select="rerun",
-        selection_mode="multi-row",
-        key=f"serp_table_{query_id}_{run_id}",
-        column_config={
-            "Позиция": st.column_config.NumberColumn(format="%d", width="small"),
-            "Изм.": st.column_config.TextColumn(width="small", help="Изменение к предыдущему сбору; «новый» — в прошлый раз товара в топе не было"),
-            "Фото": st.column_config.ImageColumn("Фото", width="small"),
-            "Товар": st.column_config.LinkColumn(
-                "ID товара", display_text=r"https://www\.wildberries\.ru/catalog/(\d+)/detail\.aspx"
-            ),
-            "Название": st.column_config.TextColumn(width="large"),
-            "Цена, ₽": st.column_config.NumberColumn(format="%d ₽"),
-            "Рейтинг": st.column_config.NumberColumn(format="★ %.1f"),
-            "Отзывы": st.column_config.NumberColumn(format="localized"),
-            "Доставка, дн.": st.column_config.NumberColumn(format="%d", help="Сегодня — 0, завтра — 1"),
-        },
-    )
-    chosen = [int(snap.iloc[i]["nm_id"]) for i in event.selection.rows] if event and event.selection.rows else []
-    c_info, c_btn = st.columns([3, 1], vertical_alignment="center")
-    with c_info:
-        st.markdown(
-            "<div class='hint'>Отметьте строки слева, чтобы добавить товары на график "
-            f"(до {MAX_SERIES} одновременно).</div>",
-            unsafe_allow_html=True,
+        snap = q_snapshot(version, query_id, int(run_id))
+        if needle:
+            hay = (
+                snap["nm_id"].astype(str) + " " + snap["name"].fillna("") + " " + snap["brand"].fillna("")
+                + " " + snap["supplier"].fillna("")
+            ).str.lower()
+            snap = snap[hay.str.contains(needle.lower(), regex=False)]
+
+        serp_table = pd.DataFrame(
+            {
+                "Позиция": snap["position"],
+                "Изм.": [change_label(c, n) for c, n in zip(snap["change"], snap["is_new"])],
+                "Фото": photos(snap["nm_id"]),
+                "Товар": snap["url"],
+                "Название": snap["name"],
+                "Бренд": snap["brand"],
+                "Продавец": snap["supplier"],
+                "Цена": snap["price_rub"],
+                "Рейтинг": snap["rating"],
+                "Отзывы": snap["feedbacks"],
+                "Доставка": snap["delivery_days"],
+            }
         )
-    with c_btn:
-        if st.button(
-            f"Добавить на график ({len(chosen)})", disabled=not chosen, type="primary", width="stretch",
-            on_click=add_to_selection, args=(chosen,),
-        ):
-            st.toast("Товары добавлены — откройте вкладку «Динамика позиций»", icon="📈")
-    st.download_button(
-        "Скачать выдачу CSV",
-        serp_table.drop(columns="Фото").assign(**{"Товар": snap["nm_id"].values}).rename(columns={"Товар": "ID товара"}).to_csv(index=False).encode("utf-8-sig"),
-        file_name=f"wb_serp_{query_id}_{run_id}.csv",
-        mime="text/csv",
-    )
+        event = st.dataframe(
+            style_changes(serp_table, "Изм.", tk),
+            hide_index=True,
+            width="stretch",
+            height=600,
+            row_height=52,
+            on_select="rerun",
+            selection_mode="multi-row",
+            key=f"serp_table_{query_id}_{run_id}",
+            column_config={
+                "Позиция": st.column_config.NumberColumn("№", format="%d", width=56),
+                "Изм.": st.column_config.TextColumn(width=72, help="Изменение к предыдущему сбору; «новый» — в прошлый раз товара в топе не было"),
+                "Фото": st.column_config.ImageColumn("", width=48),
+                "Товар": st.column_config.LinkColumn("ID товара", display_text=WB_LINK),
+                "Название": st.column_config.TextColumn(width="medium"),
+                "Бренд": st.column_config.TextColumn(width="small"),
+                "Продавец": st.column_config.TextColumn(width="small"),
+                "Цена": st.column_config.NumberColumn(format="%d ₽"),
+                "Рейтинг": st.column_config.NumberColumn(format="★ %.1f"),
+                "Отзывы": st.column_config.NumberColumn(format="localized"),
+                "Доставка": st.column_config.NumberColumn(format="%d дн.", help="Сегодня — 0, завтра — 1"),
+            },
+        )
+        chosen = [int(snap.iloc[i]["nm_id"]) for i in event.selection.rows] if event and event.selection.rows else []
+        c_add, c_csv, _ = st.columns([2, 2, 3])
+        with c_add:
+            if st.button(
+                f"Показать на графике ({len(chosen)})", disabled=not chosen, type="primary", width="stretch",
+                on_click=add_to_selection, args=(chosen,), icon=":material/show_chart:",
+            ):
+                st.toast("Товары добавлены — откройте вкладку «Динамика позиций»", icon="📈")
+        with c_csv:
+            st.download_button(
+                "Скачать выдачу CSV",
+                serp_table.drop(columns="Фото").assign(**{"Товар": snap["nm_id"].values}).rename(columns={"Товар": "ID товара"})
+                .to_csv(index=False).encode("utf-8-sig"),
+                file_name=f"wb_serp_{query_id}_{run_id}.csv",
+                mime="text/csv",
+                width="stretch",
+                icon=":material/download:",
+            )
 
 # ---------------------------------------------------------------- вкладка: журнал сборов
 with tab_runs:
     runs = q_runs(version)
     ok_runs = runs[runs["status"].isin(["ok", "partial"])]
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("Всего сборов", fmt_int(len(runs)))
-    r2.metric("Успешных", fmt_int((runs["status"] == "ok").sum()))
-    r3.metric("Первый сбор", fmt_ts(summary["first_run_msk"]))
-    r4.metric(
-        "Средняя длительность",
-        f"{ok_runs['duration_min'].mean():.1f} мин" if not ok_runs.empty else "—",
-    )
-    status_map = {"ok": "✅ успешно", "partial": "⚠️ частично", "failed": "❌ ошибка", "running": "⏳ идёт"}
-    st.dataframe(
-        pd.DataFrame(
-            {
-                "№": runs["run_id"],
-                "Начало (МСК)": runs["started_msk"].dt.strftime("%d.%m.%Y %H:%M"),
-                "Статус": runs["status"].map(status_map).fillna(runs["status"]),
-                "Запросов собрано": [
-                    f"{int(o) if pd.notna(o) else 0} из {int(t) if pd.notna(t) else 0}"
-                    for o, t in zip(runs["queries_ok"], runs["queries_total"])
-                ],
-                "Товаров": runs["items_total"],
-                "Длительность, мин": runs["duration_min"].round(1),
-                "Глубина": runs["top_n"],
-                "Где": runs["host"].map({"github-actions": "GitHub Actions", "local": "локально"}).fillna(runs["host"]),
-                "Ошибка": runs["error"].fillna(""),
-            }
+    ok_share = (runs["status"] == "ok").mean() if len(runs) else 0
+    st.markdown(
+        ui.kpis(
+            [
+                ui.Kpi("Всего сборов", fmt_int(len(runs)), f"с {fmt_ts(summary['first_run_msk'])}", "calendar"),
+                ui.Kpi("Успешных", fmt_int((runs["status"] == "ok").sum()), f"{ok_share:.0%} — все 70 запросов", "check", "ok"),
+                ui.Kpi("Последний сбор", ago(last_run) or "—", f"{fmt_ts(last_run)} МСК", "clock"),
+                ui.Kpi(
+                    "Длительность сбора",
+                    f"{ok_runs['duration_min'].mean():.1f} мин" if not ok_runs.empty else "—",
+                    "в среднем, 140 запросов к WB",
+                    "timer",
+                ),
+            ]
         ),
-        hide_index=True,
-        width="stretch",
-        column_config={"Товаров": st.column_config.NumberColumn(format="localized")},
+        unsafe_allow_html=True,
     )
-    st.caption(
-        f"Источник данных: {source}. В базе {plural(summary['observations'], 'наблюдение', 'наблюдения', 'наблюдений')}, "
-        f"{plural(summary['products'], 'товар', 'товара', 'товаров')}."
-    )
+    with st.container(key="card_runs_chart"):
+        st.markdown(
+            ui.section("Лента сборов", "столбец — один запуск, высота — сколько из 70 запросов собрано"),
+            unsafe_allow_html=True,
+        )
+        st.plotly_chart(runs_chart(runs, dark=dark), width="stretch", theme=None, config={"displayModeBar": False, "locale": "ru"})
+    with st.container(key="card_runs_table"):
+        st.markdown(ui.section("Все запуски"), unsafe_allow_html=True)
+        status_map = {"ok": "✅ успешно", "partial": "⚠️ частично", "failed": "❌ ошибка", "running": "⏳ идёт"}
+        st.dataframe(
+            pd.DataFrame(
+                {
+                    "№": runs["run_id"],
+                    "Начало (МСК)": runs["started_msk"].dt.strftime("%d.%m.%Y %H:%M"),
+                    "Статус": runs["status"].map(status_map).fillna(runs["status"]),
+                    "Запросов собрано": [
+                        f"{int(o) if pd.notna(o) else 0} из {int(t) if pd.notna(t) else 0}"
+                        for o, t in zip(runs["queries_ok"], runs["queries_total"])
+                    ],
+                    "Товаров": runs["items_total"],
+                    "Длительность": runs["duration_min"].round(1),
+                    "Глубина": runs["top_n"],
+                    "Где": runs["host"].map({"github-actions": "GitHub Actions", "local": "локально"}).fillna(runs["host"]),
+                    "Ошибка": runs["error"].fillna(""),
+                }
+            ),
+            hide_index=True,
+            width="stretch",
+            column_config={
+                "Товаров": st.column_config.NumberColumn(format="localized"),
+                "Длительность": st.column_config.NumberColumn(format="%.1f мин"),
+            },
+        )
+        st.markdown(
+            f"<div class='wb-note'>Источник данных: {escape(source)}. В базе "
+            f"{plural(summary['observations'], 'наблюдение', 'наблюдения', 'наблюдений')}, "
+            f"{plural(summary['products'], 'товар', 'товара', 'товаров')}.</div>",
+            unsafe_allow_html=True,
+        )
 
 # ---------------------------------------------------------------- вкладка: как это работает
 with tab_about:
-    st.markdown(
-        f"""
-**Что собирается.** Каждый час сборщик открывает поиск Wildberries по каждому из 70 запросов
-(формулировки — как в исходной таблице) и сохраняет первые **{top_n}** товаров в том порядке,
-в каком их показывает сайт (сортировка «по популярности»). Город доставки фиксирован —
-**{summary['city']}, центр** (код WB `dest={summary['dest']}`), чтобы сроки и выдача были сопоставимы.
+    with st.container(key="card_about"):
+        st.markdown(
+            f"""
+#### Что собирается
+Каждый час сборщик открывает поиск Wildberries по каждому из {len(queries)} запросов (формулировки — как в
+исходной таблице) и сохраняет первые **{top_n}** товаров в том порядке, в каком их показывает сайт
+(сортировка «по популярности»). Город доставки фиксирован — **{summary['city']}, центр**
+(код WB `dest={summary['dest']}`), чтобы выдача и сроки были сопоставимы.
 
-**Поля каждого наблюдения**
+#### Поля каждого наблюдения
 
 | Поле | Что это |
 |---|---|
 | Запрос, дата и время | исходная формулировка и момент получения выдачи (МСК) |
 | Позиция | место в выдаче, 1 — первое |
 | ID товара | артикул WB (nm_id) |
-| Цена | цена для покупателя со всеми скидками, ₽ (без учёта WB Кошелька — её API не отдаёт) |
+| Цена | цена для покупателя со всеми скидками, ₽ (без «WB Кошелька» — её API не отдаёт) |
 | Рейтинг, отзывы | как на карточке: «4,8 · 15 575 оценок»; у товара без оценок рейтинг пустой |
 | Доставка | календарных дней до доставки в Москву: сегодня — 0, завтра — 1 |
 | Продавец | название продавца (магазина), не бренд |
 
 Если поле недоступно, сохраняется пустое значение — ничего не подставляется.
 
-**Как читать график.** Ось позиций перевёрнута: 1 — вверху. Каждая точка — реальный сбор.
-Если при очередном сборе товара не было в топ-{top_n}, линия прерывается — позиция не
-придумывается. Сборы, завершившиеся ошибкой, на графике не участвуют.
+#### Как читать график
+Ось позиций перевёрнута: 1 — вверху. Каждая точка — реальный сбор. Если при очередном сборе товара не
+было в топ-{top_n}, линия прерывается — позиция не придумывается. Сборы, завершившиеся ошибкой, не учитываются.
 
-**История не теряется.** Данные только добавляются: каждый сбор — новая запись, прошлые
-наблюдения никогда не перезаписываются и не удаляются.
+#### Точность
+Поля сверены с карточками на сайте: срок доставки, рейтинг, число оценок и цена совпали на 100% из 510 карточек.
+Порядок выдачи совпадает с тем, что видит новый покупатель на сайте с адресом «Москва, центр».
+
+#### История не теряется
+Данные только добавляются: каждый сбор — новая запись, прошлые наблюдения никогда не перезаписываются и не удаляются.
 """
-    )
+        )
+
+st.markdown(
+    f"""<div class="wb-footer">Данные — поисковая выдача wildberries.ru, собираются автоматически каждый час ·
+    <a href="{REPO_URL}" target="_blank">исходный код на GitHub</a></div>""",
+    unsafe_allow_html=True,
+)

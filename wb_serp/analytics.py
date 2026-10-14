@@ -234,3 +234,33 @@ def db_summary(conn: sqlite3.Connection) -> dict:
             pd.Timestamp(summary[key]).tz_convert(MSK) if summary[key] else None
         )
     return summary
+
+
+def snapshot_summary(conn: sqlite3.Connection, query_id: int, run_id: int) -> dict:
+    """Что изменилось в выдаче по сравнению с предыдущим сбором: новые, выбывшие, лидеры роста и падения."""
+    prev = conn.execute(
+        "SELECT MAX(run_id) FROM query_runs WHERE query_id = ? AND status = 'ok' AND run_id < ?",
+        (query_id, run_id),
+    ).fetchone()[0]
+    result = {"prev_run_id": prev, "new": None, "dropped": None, "riser": None, "faller": None}
+    if prev is None:
+        return result
+    snap = snapshot(conn, query_id, run_id)
+    result["new"] = int(snap["is_new"].sum())
+    result["dropped"] = conn.execute(
+        """
+        SELECT COUNT(*) FROM observations p
+        WHERE p.query_id = ? AND p.run_id = ?
+          AND NOT EXISTS (SELECT 1 FROM observations c WHERE c.query_id = p.query_id AND c.run_id = ? AND c.nm_id = p.nm_id)
+        """,
+        (query_id, prev, run_id),
+    ).fetchone()[0]
+    moved = snap.dropna(subset=["change"])
+    if not moved.empty:
+        up = moved.loc[moved["change"].idxmax()]
+        down = moved.loc[moved["change"].idxmin()]
+        if up["change"] > 0:
+            result["riser"] = {"nm_id": int(up["nm_id"]), "change": int(up["change"]), "position": int(up["position"]), "brand": up["brand"]}
+        if down["change"] < 0:
+            result["faller"] = {"nm_id": int(down["nm_id"]), "change": int(down["change"]), "position": int(down["position"]), "brand": down["brand"]}
+    return result
