@@ -1,0 +1,17 @@
+# окружение
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# данные и логи — база публикуется в ветку data, а не в main
+data/
+logs/
+*.db
+*.db-journal
+*.db.xz
+
+# локальные настройки
+.streamlit/secrets.toml
+.claude/
+.DS_Store
