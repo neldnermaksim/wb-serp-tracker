@@ -192,7 +192,8 @@ div[data-testid="stTabs"] [role="tablist"] {{
   gap: 6px; background: var(--wb-card); padding: 6px; border-radius: 18px; box-shadow: var(--wb-shadow);
   border: 1px solid var(--wb-card-border); width: fit-content; max-width: 100%; overflow-x: auto; scrollbar-width: none;
 }}
-div[data-testid="stTabs"] [role="tablist"]::before, div[data-testid="stTabs"] [role="tablist"]::after {{ display: none !important; }}
+div[data-testid="stTabs"] [role="tablist"]::before, div[data-testid="stTabs"] [role="tablist"]::after,
+div[data-testid="stTabs"] .react-aria-SelectionIndicator {{ display: none !important; }}
 div[data-testid="stTabs"] [data-testid="stTab"] {{
   height: 40px; padding: 0 18px; border-radius: 13px; background: transparent; white-space: nowrap;
   transition: background .15s ease, color .15s ease; border: 0 !important;
