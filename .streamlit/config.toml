@@ -1,6 +1,11 @@
 [theme]
-primaryColor = "#8e24aa"
 font = "sans serif"
+
+[theme.light]
+primaryColor = "#8e24aa"
+
+[theme.dark]
+primaryColor = "#ce93d8"
 
 [server]
 headless = true

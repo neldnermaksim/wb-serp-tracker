@@ -234,8 +234,8 @@ st.markdown(
       .subtitle {color: var(--text-color); opacity: .68; font-size: .95rem; margin: .1rem 0 1rem 0;}
       .pill {display: inline-block; padding: .12rem .55rem; border-radius: 999px; font-size: .8rem;
              background: rgba(128,128,128,.12); margin-right: .35rem;}
-      .pill.ok {background: rgba(15,138,60,.12); color: #0f8a3c;}
-      .pill.warn {background: rgba(237,161,0,.16); color: #a66f00;}
+      .pill.ok {background: rgba(15,138,60,.14); color: var(--ok-color);}
+      .pill.warn {background: rgba(237,161,0,.18); color: var(--warn-color);}
       div[data-testid="stMetricValue"] {font-size: 1.55rem;}
       div[data-testid="stMetricLabel"] p {font-size: .85rem; opacity: .75;}
       .hint {font-size: .85rem; opacity: .7;}
@@ -264,6 +264,12 @@ if not summary["runs"]:
 dark = getattr(getattr(st.context, "theme", None), "type", "light") == "dark"
 top_n = int(summary["top_n"] or 200)
 last_run = summary["last_run_msk"]
+
+# Цвета статусов подбираются под тему, чтобы текст оставался контрастным.
+st.markdown(
+    f"<style>:root {{--ok-color: {'#5cd68a' if dark else '#0f7a35'}; --warn-color: {'#f0b429' if dark else '#8a5a00'};}}</style>",
+    unsafe_allow_html=True,
+)
 
 # ---------------------------------------------------------------- шапка
 st.title("Позиции товаров в поиске Wildberries")
@@ -330,8 +336,14 @@ if sel_key not in st.session_state:
 st.session_state[sel_key] = [x for x in st.session_state[sel_key] if x in labels_all][:MAX_SERIES]
 
 
-def pick_top(n: int) -> None:
-    st.session_state[sel_key] = in_latest[:n]
+QUICK_PICKS = {"Топ-3": 3, "Топ-5": 5, "Топ-8": 8, "Очистить": 0}
+
+
+def apply_quick_pick(widget_key: str) -> None:
+    choice = st.session_state.get(widget_key)
+    if choice in QUICK_PICKS:
+        st.session_state[sel_key] = in_latest[: QUICK_PICKS[choice]]
+    st.session_state[widget_key] = None  # кнопка-«таблетка» не остаётся нажатой
 
 
 def add_to_selection(nm_ids: list[int]) -> None:
@@ -365,11 +377,14 @@ with tab_chart:
             "Сначала идут товары из последней выдачи по порядку позиций.",
         )
     with c_quick:
-        b1, b2, b3, b4 = st.columns(4)
-        b1.button("Топ-3", on_click=pick_top, args=(3,), width="stretch")
-        b2.button("Топ-5", on_click=pick_top, args=(5,), width="stretch")
-        b3.button("Топ-8", on_click=pick_top, args=(8,), width="stretch")
-        b4.button("Сброс", on_click=pick_top, args=(0,), width="stretch")
+        st.pills(
+            "Быстрый выбор",
+            list(QUICK_PICKS),
+            key=f"quick_{query_id}",
+            on_change=apply_quick_pick,
+            args=(f"quick_{query_id}",),
+            help="Товары с первых мест последнего сбора",
+        )
 
     if not selected:
         st.info("Выберите один или несколько товаров, чтобы увидеть, как менялись их позиции.")

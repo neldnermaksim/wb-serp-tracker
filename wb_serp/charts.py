@@ -72,11 +72,12 @@ def position_chart(
         y_range = [hi + pad, max(0.5, lo - pad)]
 
     fig.update_layout(
-        height=480,
-        margin={"l": 8, "r": 8, "t": 8, "b": 8},
+        height=500,
+        margin={"l": 8, "r": 8, "t": 30, "b": 8},
         hovermode="x unified",
         hoverlabel={"namelength": -1},
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0, "title": None},
+        # Легенда под графиком: сверху она спорит с панелью инструментов Plotly.
+        legend={"orientation": "h", "yanchor": "top", "y": -0.14, "xanchor": "left", "x": 0, "title": None},
         dragmode="zoom",
     )
     fig.update_yaxes(
