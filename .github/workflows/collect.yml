@@ -2,8 +2,11 @@ name: Сбор выдачи WB
 
 on:
   schedule:
-    # Каждый час в HH:05 UTC (HH:05 по Москве + 3 ч). GitHub может запускать с задержкой в несколько минут.
+    # Основной запуск — каждый час в HH:05 (UTC и МСК отличаются на целые часы).
     - cron: "5 * * * *"
+    # Страховочный: GitHub иногда задерживает или пропускает запуски по расписанию.
+    # Сбор выполнится, только если с начала предыдущего прошло больше 40 минут.
+    - cron: "35 * * * *"
   workflow_dispatch:
     inputs:
       top_n:
@@ -60,7 +63,10 @@ jobs:
         run: python -m wb_serp.publish pull
 
       - name: Сбор выдачи
-        run: python -m wb_serp.collect ${{ github.event.inputs.limit && format('--limit {0}', github.event.inputs.limit) || '' }}
+        run: >-
+          python -m wb_serp.collect
+          ${{ github.event_name == 'schedule' && '--min-interval 40' || '' }}
+          ${{ github.event.inputs.limit && format('--limit {0}', github.event.inputs.limit) || '' }}
 
       - name: Опубликовать базу в ветку data
         # Публикуем и после частично неудачного сбора: собранное не должно пропасть.

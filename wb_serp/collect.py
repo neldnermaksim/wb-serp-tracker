@@ -123,6 +123,19 @@ async def run_collection(settings: Settings, queries: list[str]) -> tuple[int, s
     return run_id, status
 
 
+def minutes_since_last_run(db_path: Path) -> float | None:
+    if not Path(db_path).exists():
+        return None
+    conn = storage.connect(db_path)
+    try:
+        row = conn.execute("SELECT MAX(started_at) FROM runs WHERE status IN ('ok', 'partial')").fetchone()
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return None
+    return (storage.utc_now() - dt.datetime.fromisoformat(row[0])).total_seconds() / 60
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Сбор поисковой выдачи Wildberries")
     parser.add_argument("--top-n", type=int, help="сколько первых товаров выдачи сохранять (по умолчанию 200)")
@@ -130,6 +143,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--limit", type=int, help="собрать только первые N запросов из списка")
     parser.add_argument("--query", action="append", help="собрать только этот запрос (можно повторять)")
     parser.add_argument("--headful", action="store_true", help="показать окно браузера")
+    parser.add_argument(
+        "--min-interval",
+        type=int,
+        default=0,
+        metavar="MIN",
+        help="не запускать сбор, если предыдущий начался меньше MIN минут назад (страховочный запуск по расписанию)",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
@@ -145,6 +165,11 @@ def main(argv: list[str] | None = None) -> int:
         settings = replace(settings, headless=False)
     if settings.top_n < 1:
         parser.error("--top-n должен быть положительным")
+
+    if args.min_interval and (minutes := minutes_since_last_run(settings.db_path)) is not None:
+        if minutes < args.min_interval:
+            log.info("Предыдущий сбор начался %.0f мин назад — этот запуск пропускаем", minutes)
+            return 0
 
     queries = load_queries(settings.queries_file)
     if args.query:

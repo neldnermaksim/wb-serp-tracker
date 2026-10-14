@@ -84,3 +84,15 @@ def test_series_of_failures_restarts_browser_then_stops(tmp_path, monkeypatch):
     # Собранное до сбоя сохранено, неудачные запросы помечены.
     assert conn.execute("SELECT COUNT(*) FROM query_runs WHERE status = 'failed'").fetchone() == (6,)
     assert conn.execute("SELECT COUNT(*) FROM observations").fetchone() == (6,)
+
+
+def test_min_interval_skips_backup_run(tmp_path, monkeypatch):
+    run(tmp_path, monkeypatch, ok_queries=QUERIES)
+    queries_file = tmp_path / "queries.txt"
+    monkeypatch.setenv("WB_DB_PATH", str(tmp_path / "serp.db"))
+    monkeypatch.setenv("WB_QUERIES_FILE", str(queries_file))
+    FakeClient.instances.clear()
+    assert collect.main(["--min-interval", "40"]) == 0
+    assert FakeClient.instances == []  # клиент даже не создавался
+    conn = sqlite3.connect(tmp_path / "serp.db")
+    assert conn.execute("SELECT COUNT(*) FROM runs").fetchone() == (1,)

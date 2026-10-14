@@ -97,6 +97,9 @@ def push(db_path: Path, remote: str, message: str | None) -> None:
         shrunk = {t: (before[t], counts[t]) for t in TABLES if counts.get(t, 0) < before.get(t, 0)}
         if shrunk:
             raise SystemExit(f"Отказ публиковать: в базе стало меньше строк, чем было — {shrunk}")
+        if counts == before:
+            print("Новых данных нет — публикация не нужна")
+            return
     elif remote_branch_exists(remote):
         raise SystemExit("Ветка data уже существует, а база не была скачана командой pull — публикация отменена")
 
