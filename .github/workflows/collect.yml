@@ -1,37 +1,44 @@
 name: Сбор выдачи WB
 
+# Как обеспечивается «каждый час»:
+# 1. Цепочка. После сбора задание `next` ждёт ~50 минут на таймере окружения `hourly-timer`
+#    (ожидание не занимает сервер), выравнивается на HH:04 и запускает следующий сбор.
+# 2. Страховка. Cron GitHub ненадёжен (запуски задерживаются и пропускаются), поэтому он лишь
+#    перезапускает цепочку, если она оборвалась. Сбор по cron/цепочке выполняется только если
+#    с начала предыдущего прошло не меньше 45 минут — дублей не бывает.
 on:
   schedule:
-    # Основной запуск — каждый час в HH:05 (UTC и МСК отличаются на целые часы).
-    - cron: "5 * * * *"
-    # Страховочный: GitHub иногда задерживает или пропускает запуски по расписанию.
-    # Сбор выполнится, только если с начала предыдущего прошло больше 40 минут.
-    - cron: "35 * * * *"
+    - cron: "17 * * * *"
+    - cron: "47 * * * *"
   workflow_dispatch:
     inputs:
       top_n:
         description: "Глубина выдачи (top_n)"
         default: "200"
       limit:
-        description: "Только первые N запросов (пусто — все 70). Для проверки."
+        description: "Только первые N запросов (пусто — все 70). Для проверки, цепочку не продолжает."
         default: ""
       publish:
         description: "Публиковать базу в ветку data"
         type: boolean
         default: true
-
-# Сборы идут строго по одному: следующий ждёт окончания предыдущего, чтобы не потерять данные.
-concurrency:
-  group: wb-collect
-  cancel-in-progress: false
+      chain:
+        description: "Служебный: запуск из цепочки (пропустит сбор, если предыдущий был меньше 45 минут назад)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
+  actions: write
 
 jobs:
   collect:
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # Сборы идут строго по одному: следующий ждёт окончания предыдущего, чтобы не потерять данные.
+    concurrency:
+      group: wb-collect
+      cancel-in-progress: false
     env:
       WB_TOP_N: ${{ github.event.inputs.top_n || '200' }}
       GIT_AUTHOR_NAME: github-actions[bot]
@@ -65,7 +72,7 @@ jobs:
       - name: Сбор выдачи
         run: >-
           python -m wb_serp.collect
-          ${{ github.event_name == 'schedule' && '--min-interval 40' || '' }}
+          ${{ (github.event_name == 'schedule' || github.event.inputs.chain == 'true') && '--min-interval 45' || '' }}
           ${{ github.event.inputs.limit && format('--limit {0}', github.event.inputs.limit) || '' }}
 
       - name: Опубликовать базу в ветку data
@@ -87,7 +94,34 @@ jobs:
           if os.path.exists("data/serp.db"):
               c = sqlite3.connect("data/serp.db")
               r = c.execute("SELECT id, status, queries_ok, queries_total, items_total, started_at FROM runs ORDER BY id DESC LIMIT 1").fetchone()
-              line = f"Сбор #{r[0]}: {r[1]}, запросов {r[2]}/{r[3]}, товаров {r[4]}, старт {r[5]} UTC"
+              line = f"Последний сбор в базе — #{r[0]}: {r[1]}, запросов {r[2]}/{r[3]}, товаров {r[4]}, старт {r[5]} UTC"
               print(line)
               open(os.environ["GITHUB_STEP_SUMMARY"], "a").write(line + "\n")
           PY
+
+  next:
+    name: Запланировать следующий сбор
+    needs: collect
+    # Даже если сбор упал, цепочка продолжается. Проверочные запуски (limit) её не продолжают.
+    if: ${{ !cancelled() && !github.event.inputs.limit }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: hourly-timer  # таймер ожидания 50 минут
+    steps:
+      - name: Дождаться HH:04 и запустить следующий сбор
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Выравниваемся на HH:04, чтобы сборы не «уплывали» по времени.
+          now=$(date -u +%s); minute=$(date -u +%M); second=$(date -u +%S)
+          wait=$(( ( (64 - 10#$minute) % 60 ) * 60 - 10#$second ))
+          if [ "$wait" -gt 0 ] && [ "$wait" -le 1200 ]; then echo "Ждём $wait с до HH:04"; sleep "$wait"; fi
+          # Если уже идёт или ждёт другой запуск — цепочку продолжит он, второй не нужен.
+          others=$(gh run list -R "$GITHUB_REPOSITORY" --workflow collect.yml --limit 20 --json databaseId,status \
+            --jq "[.[] | select(.databaseId != ${GITHUB_RUN_ID}) | select(.status != \"completed\")] | length")
+          if [ "$others" -gt 0 ]; then
+            echo "Уже есть активный запуск ($others) — следующий не создаём"
+            exit 0
+          fi
+          gh workflow run collect.yml -R "$GITHUB_REPOSITORY" -f chain=true
+          echo "Следующий сбор запущен"
