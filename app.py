@@ -165,6 +165,18 @@ def fmt_int(value) -> str:
     return f"{int(value):,}".replace(",", " ")
 
 
+def plural(n, one: str, few: str, many: str) -> str:
+    """«1 сбор», «3 сбора», «11 сборов»."""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        word = one
+    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        word = few
+    else:
+        word = many
+    return f"{fmt_int(n)} {word}"
+
+
 def short(text, limit: int = 38) -> str:
     if not isinstance(text, str) or not text:
         return ""
@@ -262,7 +274,7 @@ st.markdown(
       <span class="pill">🔝 топ-{top_n}</span>
       <span class="pill">⏱ сбор каждый час</span>
       <span class="pill {status_class}">последний сбор: {fmt_ts(last_run)} МСК · {ago(last_run)}</span>
-      <span class="pill">{fmt_int(summary['runs'])} сборов · {fmt_int(summary['observations'])} наблюдений</span>
+      <span class="pill">{plural(summary['runs'], 'сбор', 'сбора', 'сборов')} · {plural(summary['observations'], 'наблюдение', 'наблюдения', 'наблюдений')}</span>
     </div>""",
     unsafe_allow_html=True,
 )
@@ -504,7 +516,7 @@ with tab_serp:
             runs_desc["run_id"].tolist(),
             format_func=lambda rid: (
                 f"{fmt_ts(runs_desc.set_index('run_id').at[rid, 'collected_msk'])} МСК · "
-                f"{int(runs_desc.set_index('run_id').at[rid, 'items'])} товаров"
+                f"{plural(runs_desc.set_index('run_id').at[rid, 'items'], 'товар', 'товара', 'товаров')}"
             ),
             key=f"serp_run_{query_id}",
         )
@@ -610,7 +622,10 @@ with tab_runs:
         width="stretch",
         column_config={"Товаров": st.column_config.NumberColumn(format="localized")},
     )
-    st.caption(f"Источник данных: {source}. База: {fmt_int(summary['observations'])} наблюдений, {fmt_int(summary['products'])} товаров.")
+    st.caption(
+        f"Источник данных: {source}. В базе {plural(summary['observations'], 'наблюдение', 'наблюдения', 'наблюдений')}, "
+        f"{plural(summary['products'], 'товар', 'товара', 'товаров')}."
+    )
 
 # ---------------------------------------------------------------- вкладка: как это работает
 with tab_about:
