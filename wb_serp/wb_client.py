@@ -112,6 +112,11 @@ class WBSearchClient:
         log.info("Браузер запущен: Chromium %s", self._browser.version)
         await self._new_context()
 
+    async def restart(self) -> None:
+        """Полный перезапуск браузера — на случай, если он завис или упал."""
+        await self.close()
+        await self.start()
+
     async def close(self) -> None:
         for closer in (self._context, self._browser):
             if closer is not None:

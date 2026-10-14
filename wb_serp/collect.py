@@ -24,6 +24,9 @@ from .wb_client import WBSearchClient
 
 log = logging.getLogger("wb_serp")
 
+MAX_FAILURES_BEFORE_RESTART = 3
+MAX_FAILURES_BEFORE_ABORT = 6
+
 
 def _host_label() -> str:
     if os.environ.get("WB_HOST_LABEL"):
@@ -57,6 +60,7 @@ async def run_collection(settings: Settings, queries: list[str]) -> tuple[int, s
             max_retries=settings.max_retries,
         ) as client:
             pending = list(queries)
+            consecutive_failures = 0
             # Второй проход — только по запросам, которые не удалось собрать с первого раза.
             for attempt in (1, 2):
                 failed: list[str] = []
@@ -68,7 +72,17 @@ async def run_collection(settings: Settings, queries: list[str]) -> tuple[int, s
                         errors[query] = str(exc)
                         failed.append(query)
                         log.error("[%s/%s] %s — ошибка: %s", i, len(pending), query, exc)
+                        # Предохранитель: серия ошибок подряд — значит, проблема не в запросе.
+                        consecutive_failures += 1
+                        if consecutive_failures == MAX_FAILURES_BEFORE_RESTART:
+                            log.warning("%s ошибки подряд — перезапускаем браузер", consecutive_failures)
+                            await client.restart()
+                        elif consecutive_failures >= MAX_FAILURES_BEFORE_ABORT:
+                            raise RuntimeError(
+                                f"{consecutive_failures} запросов подряд завершились ошибкой — сбор остановлен"
+                            ) from exc
                         continue
+                    consecutive_failures = 0
                     storage.save_query_result(
                         conn,
                         run_id=run_id,
