@@ -11,7 +11,9 @@
 * если ветка есть, но скачать её не удалось — сбор останавливается, а не
   начинается с пустой базы;
 * перед публикацией проверяется целостность SQLite и то, что ни в одной таблице
-  не стало меньше строк, чем было в скачанной базе.
+  не стало меньше строк, чем было в скачанной базе;
+* ветка перезаписывается только если на GitHub она не изменилась с момента
+  скачивания (``--force-with-lease``): два сборщика не затрут данные друг друга.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from .config import Settings
 
 BRANCH = "data"
 REMOTE_FILE = "serp.db.xz"
-COUNTS_FILE = ".pulled_counts.json"
+STATE_FILE = ".pulled_state.json"
 TABLES = ("queries", "runs", "query_runs", "products", "observations")
 # Индекс нужен только для быстрых выборок — в публикуемой копии его нет (файл меньше),
 # сборщик и веб-интерфейс создают его заново после загрузки.
@@ -58,21 +60,32 @@ def remote_branch_exists(remote: str) -> bool:
     raise SystemExit(f"Не удалось связаться с {remote}: {result.stderr.strip()}")
 
 
+def save_state(db_path: Path, counts: dict | None, remote_sha: str) -> None:
+    """Что было скачано: число строк в таблицах и коммит ветки data на GitHub."""
+    (db_path.parent / STATE_FILE).write_text(json.dumps({"counts": counts, "remote_sha": remote_sha}))
+
+
+def load_state(db_path: Path) -> dict | None:
+    path = db_path.parent / STATE_FILE
+    return json.loads(path.read_text()) if path.exists() else None
+
+
 def pull(db_path: Path, remote: str) -> None:
-    counts_path = db_path.parent / COUNTS_FILE
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     if not remote_branch_exists(remote):
         print(f"Ветки {BRANCH} ещё нет — начинаем новую базу")
-        counts_path.unlink(missing_ok=True)
+        save_state(db_path, None, "")  # "" — при публикации ветки ещё не должно быть
         return
     git("fetch", "--depth=1", remote, f"+refs/heads/{BRANCH}:refs/remotes/{remote}/{BRANCH}")
-    blob = subprocess.run(["git", "show", f"{remote}/{BRANCH}:{REMOTE_FILE}"], check=True, capture_output=True).stdout
+    remote_sha = git("rev-parse", f"refs/remotes/{remote}/{BRANCH}").stdout.strip()
+    blob = subprocess.run(["git", "show", f"{remote_sha}:{REMOTE_FILE}"], check=True, capture_output=True).stdout
     db_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = db_path.with_suffix(".download")
     tmp.write_bytes(lzma.decompress(blob))
     check_integrity(tmp)
     tmp.replace(db_path)
     counts = table_counts(db_path)
-    counts_path.write_text(json.dumps(counts))
+    save_state(db_path, counts, remote_sha)
     print(f"База скачана: {db_path} ({db_path.stat().st_size / 1e6:.1f} МБ), {counts}")
 
 
@@ -91,17 +104,17 @@ def push(db_path: Path, remote: str, message: str | None) -> None:
         raise SystemExit(f"Нет базы {db_path}")
     check_integrity(db_path)
     counts = table_counts(db_path)
-    counts_path = db_path.parent / COUNTS_FILE
-    if counts_path.exists():
-        before = json.loads(counts_path.read_text())
+    state = load_state(db_path)
+    if state is None:
+        raise SystemExit("База не была скачана командой pull — публикация отменена (иначе можно затереть историю)")
+    before = state["counts"]
+    if before is not None:
         shrunk = {t: (before[t], counts[t]) for t in TABLES if counts.get(t, 0) < before.get(t, 0)}
         if shrunk:
             raise SystemExit(f"Отказ публиковать: в базе стало меньше строк, чем было — {shrunk}")
         if counts == before:
             print("Новых данных нет — публикация не нужна")
             return
-    elif remote_branch_exists(remote):
-        raise SystemExit("Ветка data уже существует, а база не была скачана командой pull — публикация отменена")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_db = Path(tmpdir) / "serp.db"
@@ -127,8 +140,15 @@ def push(db_path: Path, remote: str, message: str | None) -> None:
         runs = counts["runs"]
         msg = message or f"data: {runs} сборов, {counts['observations']} наблюдений"
         commit = git("commit-tree", tree, "-m", msg).stdout.strip()
-        git("push", "--force", remote, f"{commit}:refs/heads/{BRANCH}", capture=False)
-    counts_path.write_text(json.dumps(counts))
+        # Перезаписываем ветку, только если на GitHub она та же, что мы скачали.
+        lease = f"--force-with-lease=refs/heads/{BRANCH}:{state['remote_sha']}"
+        result = git("push", lease, remote, f"{commit}:refs/heads/{BRANCH}", check=False)
+        if result.returncode != 0:
+            raise SystemExit(
+                "Ветку data за это время обновил другой сборщик — публикация отменена, чтобы не затереть его данные.\n"
+                + result.stderr.strip()
+            )
+    save_state(db_path, counts, commit)
     print(f"Опубликовано в ветку {BRANCH}: {size_mb:.1f} МБ, {counts}")
 
 
